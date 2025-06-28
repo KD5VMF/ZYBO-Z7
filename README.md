@@ -1,22 +1,12 @@
-# Zybo Z7-20 PetaLinux 2022.1 Full Setup & SD Card Boot Guide
+# Zybo Z7-20 Petalinux Build and SD Card Setup
 
-This guide walks you through creating a bootable SD card for the Digilent **Zybo Z7-20** board using the provided BSP file and generating all necessary files (`BOOT.BIN`, `image.ub`, etc).
+This guide will walk you through building a working Petalinux image and preparing an SD card for the Digilent Zybo Z7-20 board.
 
 ---
 
-## 📁 Directory Structure
+## 📁 Directory Setup
 
-We assume you have this layout inside your working directory:
-
-```
-~/xilinx_installers/
-├── Xilinx_Unified_2022.1_0420_0327_Lin64.bin
-├── petalinux-v2022.1-04191534-installer.run
-├── Zybo-Z7-20-Petalinux-2022-1.bsp
-└── ZYBO_Z7-20_Builds/
-```
-
-Create the build folder:
+Create a main folder for your project:
 
 ```bash
 mkdir -p ~/xilinx_installers/ZYBO_Z7-20_Builds
@@ -25,28 +15,36 @@ cd ~/xilinx_installers/ZYBO_Z7-20_Builds
 
 ---
 
-## 🧰 Step 1: Create PetaLinux Project from BSP
+## 📦 Create the PetaLinux Project
+
+Make sure you've sourced the environment setup script:
 
 ```bash
-petalinux-create -t project -s ../Zybo-Z7-20-Petalinux-2022-1.bsp -n zybo_digilent
+source ~/Xilinx/PetaLinux/2022.1/settings.sh
+```
+
+Then run:
+
+```bash
+petalinux-create -t project -s ~/xilinx_installers/Zybo-Z7-20-Petalinux-2022-1.bsp -n zybo_digilent
 cd zybo_digilent
 ```
 
 ---
 
-## ⚙️ Step 2: Build the Project
+## 🛠️ Build the Project
+
+To build everything:
 
 ```bash
 petalinux-build
 ```
 
-> 💡 This step will take some time. You can monitor usage with `htop`.
-
 ---
 
-## 📦 Step 3: Package BOOT.BIN
+## 🧱 Package BOOT.BIN and image.ub
 
-Once `petalinux-build` completes, generate `BOOT.BIN`:
+After a successful build:
 
 ```bash
 petalinux-package --boot \
@@ -57,93 +55,36 @@ petalinux-package --boot \
   --force
 ```
 
-This generates `BOOT.BIN` and confirms `image.ub` exists.
+This will generate the `BOOT.BIN` file in `images/linux`.
 
 ---
 
-## 💾 Step 4: Flash SD Card Using Menu Script
+## 💾 Prepare the SD Card
 
-Place the following `write_sd_card.sh` in your project root:
+Use the interactive SD card flashing script provided.
 
-```bash
-nano write_sd_card.sh
-```
-
-Paste the following:
-
-\`\`\`bash
-#!/bin/bash
-set -e
-
-echo "Available removable drives:"
-lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/sd"
-
-read -p "Enter the path of the SD card (e.g., /dev/sda): " SD_CARD
-
-echo "You selected: $SD_CARD"
-read -p "Are you sure you want to WRITE to $SD_CARD? This will ERASE ALL DATA. (y/N): " confirm
-[[ $confirm != "y" ]] && echo "Aborted." && exit 1
-
-echo "🔄 Wiping old partitions..."
-sudo umount ${SD_CARD}?* || true
-sudo dd if=/dev/zero of=$SD_CARD bs=1M count=10
-sudo parted -s $SD_CARD mklabel msdos
-
-echo "💽 Creating new partitions..."
-sudo parted -s $SD_CARD mkpart primary fat32 4MB 100MB
-sudo parted -s $SD_CARD mkpart primary ext4 100MB 100%
-
-sleep 1
-sudo mkfs.vfat ${SD_CARD}1 -n BOOT
-sudo mkfs.ext4 ${SD_CARD}2 -L ROOTFS
-
-echo "📁 Mounting partitions..."
-sudo mkdir -p /mnt/sdboot
-sudo mount ${SD_CARD}1 /mnt/sdboot
-
-echo "📦 Copying boot files..."
-sudo cp images/linux/BOOT.BIN images/linux/image.ub /mnt/sdboot/
-sync
-
-echo "📦 Unmounting and cleaning up..."
-sudo umount /mnt/sdboot
-sudo rmdir /mnt/sdboot
-
-echo "✅ SD card successfully flashed to $SD_CARD"
-\`\`\`
-
-Then run:
+### Example:
 
 ```bash
+cd ~/xilinx_installers/ZYBO_Z7-20_Builds
 chmod +x write_sd_card.sh
 ./write_sd_card.sh
 ```
 
----
+It will:
 
-## 🧪 Step 5: Boot the Zybo Z7-20
-
-1. Insert the flashed SD card into the board
-2. Set boot mode to SD (MIO[5:0] = `00010`)
-3. Power cycle the board
-4. You should see PetaLinux boot over serial (115200 baud)
-
----
-
-## 🧯 Troubleshooting
-
-- `BOOT.BIN` build errors? Delete `BOOT.BIN` and `image.ub` and rebuild using `petalinux-package`
-- LED not blinking? Confirm the device tree correctly maps `axi_gpio_led` to the user LEDs.
+- List removable drives
+- Ask you to pick one
+- Wipe old partitions
+- Create:
+  - a 100MB `boot` (FAT32)
+  - the rest as `rootfs` (ext4)
+- Copy `BOOT.BIN` and `image.ub` from `zybo_digilent/images/linux/`
 
 ---
 
-## 📝 Notes
+## ✅ Boot Zybo Z7-20
 
-- Your working PetaLinux project folder is:  
-  `~/xilinx_installers/ZYBO_Z7-20_Builds/zybo_digilent/`
-- All final boot files are inside:  
-  `~/xilinx_installers/ZYBO_Z7-20_Builds/zybo_digilent/images/linux/`
+Insert the SD card, set the boot mode to SD on the Zybo Z7-20 board, and power it on. It should boot Linux from the SD card.
 
 ---
-
-Happy building! 💻⚡
