@@ -1,71 +1,105 @@
 #!/bin/bash
+# smart_sd_card_builder.sh — numbered selection, full wipe, 200 MiB BOOT, rest ROOTFS
 
-# Zybo Z7-20 SD Card Builder Script
-# Safely format and copy BOOT.BIN and image.ub to SD card
+set -euo pipefail
 
-set -e
+# 1) Find BOOT.BIN & image.ub
+BOOT_BIN=$(find . -path "*/images/linux/BOOT.BIN" | head -n1)
+IMAGE_UB=$(find . -path "*/images/linux/image.ub"   | head -n1)
 
-BOOT_BIN="images/linux/BOOT.BIN"
-IMAGE_UB="images/linux/image.ub"
-
-echo "=== Zybo Z7-20 SD Card Builder ==="
-
-# Check required files
-if [[ ! -f "$BOOT_BIN" || ! -f "$IMAGE_UB" ]]; then
-    echo "ERROR: $BOOT_BIN or $IMAGE_UB not found!"
-    exit 1
+if [[ -z $BOOT_BIN || -z $IMAGE_UB ]]; then
+  echo "ERROR: BOOT.BIN or image.ub not found under ./images/linux/"
+  exit 1
 fi
 
-# Show block devices
+echo "Found:"
+echo "  BOOT = $BOOT_BIN"
+echo "  KIMG = $IMAGE_UB"
 echo
-echo "Available storage devices:"
-lsblk -dpno NAME,SIZE,MODEL | grep -v "loop"
 
-# Ask user for target device
-echo
-read -rp "Enter the device path to your SD card (e.g., /dev/sdX): " DEV
-
-if [[ ! -b "$DEV" ]]; then
-    echo "ERROR: $DEV is not a valid block device."
-    exit 1
+# 2) List removable drives
+mapfile -t DEVS < <(lsblk -dpno NAME,RM,SIZE,MODEL | awk '$2==1{print $1}')
+if (( ${#DEVS[@]} == 0 )); then
+  echo "No removable block devices found."
+  exit 1
 fi
 
-echo
-read -rp "Are you sure you want to erase and reformat $DEV? This will destroy all data on it. (yes/NO): " CONFIRM
-
-if [[ "$CONFIRM" != "yes" ]]; then
-    echo "Aborted."
-    exit 0
-fi
-
-echo
-echo "Unmounting any mounted partitions..."
-for part in $(ls ${DEV}?* 2>/dev/null); do
-    umount "$part" 2>/dev/null || true
+echo "Select SD card to flash:"
+for i in "${!DEVS[@]}"; do
+  echo "  [$i] ${DEVS[$i]}"
 done
+echo
+read -rp "Enter number: " IDX
+if ! [[ $IDX =~ ^[0-9]+$ ]] || (( IDX<0 || IDX>=${#DEVS[@]} )); then
+  echo "Invalid selection."; exit 1
+fi
+DEV=${DEVS[$IDX]}
+echo "→ You chose $DEV"; echo
 
-echo "Wiping partition table..."
+# 3) Confirm
+read -rp "This will ERASE ALL DATA on $DEV. Type YES to confirm: " CONF
+[[ $CONF == "YES" ]] || { echo "Aborted."; exit 1; }
+
+# 4) Unmount & wipe
+echo "Unmounting partitions..."
+umount "${DEV}"* 2>/dev/null || true
+echo "Wiping partitions..."
 wipefs -a "$DEV"
-sgdisk --zap-all "$DEV"
+sgdisk --zap-all "$DEV" >/dev/null 2>&1
 
-echo "Creating new partition..."
-echo -e "o\nn\np\n1\n\n\nw" | fdisk "$DEV"
+# 5) Partition: 200 MiB FAT32 + rest ext4
+echo "Creating partition table..."
+parted -s "$DEV" mklabel msdos
+echo "Creating BOOT partition (200 MiB)..."
+parted -s "$DEV" mkpart primary fat32 1MiB 201MiB
+echo "Creating ROOTFS partition..."
+parted -s "$DEV" mkpart primary ext4 201MiB 100%
 
-sleep 1
-mkfs.vfat -F 32 "${DEV}1" -n BOOT
+sleep 2
+if [[ $DEV == *mmcblk* ]]; then
+  BOOT_P="${DEV}p1"; ROOT_P="${DEV}p2"
+else
+  BOOT_P="${DEV}1";  ROOT_P="${DEV}2"
+fi
 
-echo "Mounting and copying files..."
-MOUNTDIR=$(mktemp -d)
-mount "${DEV}1" "$MOUNTDIR"
+# 6) Format & label
+echo "Formatting BOOT ($BOOT_P) as FAT32..."
+mkfs.vfat -F32 -n BOOT "$BOOT_P"
+echo "Formatting ROOTFS ($ROOT_P) as ext4..."
+mkfs.ext4 -F -L ROOTFS "$ROOT_P"
 
-cp "$BOOT_BIN" "$MOUNTDIR"
-cp "$IMAGE_UB" "$MOUNTDIR"
+# 7) Mount points
+M1=$(mktemp -d)
+M2=$(mktemp -d)
+mount "$BOOT_P" "$M1"
+mount "$ROOT_P" "$M2"
 
+# 8) Verify BOOT space
+avail=$(df --output=avail -k "$M1" | tail -1)
+needed=$(( $(stat -c%s "$BOOT_BIN") + $(stat -c%s "$IMAGE_UB") + 4*1024*1024 ))
+if (( avail*1024 < needed )); then
+  echo "ERROR: Not enough space on BOOT partition ($((avail/1024)) MiB available)." 
+  umount "$M1" "$M2"; rm -rf "$M1" "$M2"
+  exit 1
+fi
+
+# 9) Copy files
+echo "Copying BOOT files..."
+cp "$BOOT_BIN" "$M1/"
+cp "$IMAGE_UB" "$M1/"
+[[ -f boot.scr ]] && cp boot.scr "$M1/"
+[[ -f system.dtb ]] && cp system.dtb "$M1/"
+
+# 10) Optional: extract rootfs
+if [[ -f rootfs.tar.gz ]]; then
+  echo "Extracting rootfs.tar.gz to ROOTFS..."
+  tar -xzf rootfs.tar.gz -C "$M2"
+fi
+
+# 11) Cleanup
 sync
-umount "$MOUNTDIR"
-rm -rf "$MOUNTDIR"
+umount "$M1" "$M2"
+rm -rf "$M1" "$M2"
 
 echo
-echo "✅ SD card prepared successfully with:"
-echo "  - $BOOT_BIN"
-echo "  - $IMAGE_UB"
+echo "✅ SD card $DEV is ready for Zybo Z7-20!"
