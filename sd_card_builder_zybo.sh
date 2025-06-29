@@ -1,107 +1,89 @@
 #!/bin/bash
-# smart_sd_card_builder.sh — SD image writer for Zybo Z7-20
-# Partition: BOOT=200MiB FAT32, ROOTFS=remaining ext4, with rootfs.tar.gz support
+# smart_sd_card_autobuilder.sh — Full SD setup for Zybo Z7-20
+# Creates BOOT (200MiB FAT32) + ROOTFS (ext4, full Linux root), wipes old partitions
 
 set -euo pipefail
 
-# 1) Find BOOT.BIN & image.ub
-BOOT_BIN=$(find . -path "*/images/linux/BOOT.BIN" | head -n1)
-IMAGE_UB=$(find . -path "*/images/linux/image.ub"   | head -n1)
+# Step 1: Locate necessary files
+BOOT_BIN=$(find . -name BOOT.BIN | head -n1)
+IMAGE_UB=$(find . -name image.ub | head -n1)
+ROOTFS_TAR=$(find . -name rootfs.tar.gz | head -n1 || true)
 
-if [[ -z $BOOT_BIN || -z $IMAGE_UB ]]; then
-  echo "ERROR: BOOT.BIN or image.ub not found under ./images/linux/"
+if [[ ! -f "$BOOT_BIN" || ! -f "$IMAGE_UB" ]]; then
+  echo "ERROR: BOOT.BIN and/or image.ub not found."
   exit 1
 fi
 
 echo "Found:"
-echo "  BOOT = $BOOT_BIN"
-echo "  KIMG = $IMAGE_UB"
-[[ -f rootfs.tar.gz ]] && echo "  ROOTFS = rootfs.tar.gz"
+echo "  BOOT.BIN: $BOOT_BIN"
+echo "  image.ub: $IMAGE_UB"
+[[ -f "$ROOTFS_TAR" ]] && echo "  rootfs.tar.gz: $ROOTFS_TAR"
 echo
 
-# 2) List removable drives
+# Step 2: Detect removable devices
 mapfile -t DEVS < <(lsblk -dpno NAME,RM,SIZE,MODEL | awk '$2==1{print $1}')
 if (( ${#DEVS[@]} == 0 )); then
-  echo "No removable block devices found."
+  echo "No removable devices found."
   exit 1
 fi
 
-echo "Select SD card to flash:"
+echo "Select SD card device:"
 for i in "${!DEVS[@]}"; do
   echo "  [$i] ${DEVS[$i]}"
 done
-echo
 read -rp "Enter number: " IDX
-if ! [[ $IDX =~ ^[0-9]+$ ]] || (( IDX<0 || IDX>=${#DEVS[@]} )); then
-  echo "Invalid selection."; exit 1
-fi
+[[ $IDX =~ ^[0-9]+$ && $IDX -ge 0 && $IDX -lt ${#DEVS[@]} ]] || { echo "Invalid selection."; exit 1; }
 DEV=${DEVS[$IDX]}
-echo "→ You chose $DEV"; echo
+echo "Using device: $DEV"
 
-# 3) Confirm
-read -rp "This will ERASE ALL DATA on $DEV. Type YES to confirm: " CONF
-[[ $CONF == "YES" ]] || { echo "Aborted."; exit 1; }
+read -rp "⚠️ This will erase ALL data on $DEV. Type YES to confirm: " CONF
+[[ "$CONF" == "YES" ]] || { echo "Aborted."; exit 1; }
 
-# 4) Unmount & wipe
-echo "Unmounting partitions..."
+# Step 3: Unmount & Wipe
 umount "${DEV}"* 2>/dev/null || true
-echo "Wiping partitions..."
 wipefs -a "$DEV"
-sgdisk --zap-all "$DEV" >/dev/null 2>&1
+sgdisk --zap-all "$DEV" || true
 
-# 5) Partition: 200 MiB FAT32 + rest ext4
-echo "Creating partition table..."
+# Step 4: Create new partitions
 parted -s "$DEV" mklabel msdos
-echo "Creating BOOT partition (200 MiB)..."
 parted -s "$DEV" mkpart primary fat32 1MiB 201MiB
-echo "Creating ROOTFS partition..."
 parted -s "$DEV" mkpart primary ext4 201MiB 100%
 
 sleep 2
-if [[ $DEV == *mmcblk* ]]; then
-  BOOT_P="${DEV}p1"; ROOT_P="${DEV}p2"
+if [[ "$DEV" == *mmcblk* ]]; then
+  BOOT_P="${DEV}p1"
+  ROOT_P="${DEV}p2"
 else
-  BOOT_P="${DEV}1";  ROOT_P="${DEV}2"
+  BOOT_P="${DEV}1"
+  ROOT_P="${DEV}2"
 fi
 
-# 6) Format & label
-echo "Formatting BOOT ($BOOT_P) as FAT32..."
+# Step 5: Format
 mkfs.vfat -F32 -n BOOT "$BOOT_P"
-echo "Formatting ROOTFS ($ROOT_P) as ext4..."
 mkfs.ext4 -F -L ROOTFS "$ROOT_P"
 
-# 7) Mount points
-M1=$(mktemp -d)
-M2=$(mktemp -d)
-mount "$BOOT_P" "$M1"
-mount "$ROOT_P" "$M2"
+# Step 6: Mount
+BOOT_MNT=$(mktemp -d)
+ROOT_MNT=$(mktemp -d)
+mount "$BOOT_P" "$BOOT_MNT"
+mount "$ROOT_P" "$ROOT_MNT"
 
-# 8) Verify BOOT space
-avail=$(df --output=avail -k "$M1" | tail -1)
-needed=$(( $(stat -c%s "$BOOT_BIN") + $(stat -c%s "$IMAGE_UB") + 4*1024*1024 ))
-if (( avail*1024 < needed )); then
-  echo "ERROR: Not enough space on BOOT partition ($((avail/1024)) MiB available)." 
-  umount "$M1" "$M2"; rm -rf "$M1" "$M2"
-  exit 1
-fi
-
-# 9) Copy files to BOOT
-echo "Copying BOOT files..."
-cp "$BOOT_BIN" "$M1/"
-cp "$IMAGE_UB" "$M1/"
-[[ -f boot.scr ]] && cp boot.scr "$M1/"
-[[ -f system.dtb ]] && cp system.dtb "$M1/"
-
-# 10) Copy rootfs.tar.gz if available
-if [[ -f rootfs.tar.gz ]]; then
-  echo "Extracting rootfs.tar.gz to ROOTFS partition..."
-  tar -xzf rootfs.tar.gz -C "$M2"
-fi
-
-# 11) Cleanup
+# Step 7: Copy files
+cp "$BOOT_BIN" "$BOOT_MNT/"
+cp "$IMAGE_UB" "$BOOT_MNT/"
+[[ -f boot.scr ]] && cp boot.scr "$BOOT_MNT/"
+[[ -f system.dtb ]] && cp system.dtb "$BOOT_MNT/"
 sync
-umount "$M1" "$M2"
-rm -rf "$M1" "$M2"
 
-echo
-echo "✅ SD card $DEV is now fully ready for Zybo Z7-20 booting from mmcblk0p2 rootfs."
+if [[ -f "$ROOTFS_TAR" ]]; then
+  echo "Extracting rootfs to ROOTFS partition..."
+  tar -xzf "$ROOTFS_TAR" -C "$ROOT_MNT"
+  sync
+fi
+
+# Step 8: Finalize
+umount "$BOOT_MNT" "$ROOT_MNT"
+rm -rf "$BOOT_MNT" "$ROOT_MNT"
+sync
+
+echo "✅ SD card ready. ROOTFS is now bootable partition."
