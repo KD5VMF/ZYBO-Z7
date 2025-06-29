@@ -1,5 +1,6 @@
 #!/bin/bash
-# smart_sd_card_builder.sh — numbered selection, full wipe, 200 MiB BOOT, rest ROOTFS
+# smart_sd_card_builder.sh — SD image writer for Zybo Z7-20
+# Partition: BOOT=200MiB FAT32, ROOTFS=remaining ext4, with rootfs.tar.gz support
 
 set -euo pipefail
 
@@ -15,6 +16,7 @@ fi
 echo "Found:"
 echo "  BOOT = $BOOT_BIN"
 echo "  KIMG = $IMAGE_UB"
+[[ -f rootfs.tar.gz ]] && echo "  ROOTFS = rootfs.tar.gz"
 echo
 
 # 2) List removable drives
@@ -83,16 +85,16 @@ if (( avail*1024 < needed )); then
   exit 1
 fi
 
-# 9) Copy files
+# 9) Copy files to BOOT
 echo "Copying BOOT files..."
 cp "$BOOT_BIN" "$M1/"
 cp "$IMAGE_UB" "$M1/"
 [[ -f boot.scr ]] && cp boot.scr "$M1/"
 [[ -f system.dtb ]] && cp system.dtb "$M1/"
 
-# 10) Optional: extract rootfs
+# 10) Copy rootfs.tar.gz if available
 if [[ -f rootfs.tar.gz ]]; then
-  echo "Extracting rootfs.tar.gz to ROOTFS..."
+  echo "Extracting rootfs.tar.gz to ROOTFS partition..."
   tar -xzf rootfs.tar.gz -C "$M2"
 fi
 
@@ -102,4 +104,4 @@ umount "$M1" "$M2"
 rm -rf "$M1" "$M2"
 
 echo
-echo "✅ SD card $DEV is ready for Zybo Z7-20!"
+echo "✅ SD card $DEV is now fully ready for Zybo Z7-20 booting from mmcblk0p2 rootfs."
